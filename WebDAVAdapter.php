@@ -48,6 +48,8 @@ class WebDAVAdapter implements FilesystemAdapter, PublicUrlGenerator
         '{DAV:}getlastmodified',
         '{DAV:}iscollection',
         '{DAV:}resourcetype',
+        '{http://owncloud.org/ns:}owner-id',
+        '{http://owncloud.org/ns:}owner-display-name',
     ];
 
     private PathPrefixer $prefixer;
@@ -248,7 +250,20 @@ class WebDAVAdapter implements FilesystemAdapter, PublicUrlGenerator
 
     public function visibility(string $path): FileAttributes
     {
-        throw UnableToRetrieveMetadata::visibility($path, 'WebDAV does not support this operation.');
+        $location = $this->encodePath($this->prefixer->prefixPath($path));
+        $response = $this->client->propFind($location, self::FIND_PROPERTIES, 0);
+        $response = $this->normalizeObject($response);
+        $extraMetadata = [];
+        if (isset($response['owner_id']) || isset($response['owner_name'])) {
+            $extraMetadata = [
+                'owner' => [
+                    'id' => $response['owner_id'] ?? null,
+                    'name' => $response['owner_name'] ?? null,
+                ],
+            ];
+        }
+
+        return new FileAttributes($path, null, \League\Flysystem\Visibility::PRIVATE, null, null, $extraMetadata);
     }
 
     public function mimeType(string $path): FileAttributes
@@ -284,9 +299,22 @@ class WebDAVAdapter implements FilesystemAdapter, PublicUrlGenerator
             $path = (string) parse_url(rawurldecode($path), PHP_URL_PATH);
             $path = $this->prefixer->stripPrefix($path);
             $object = $this->normalizeObject($object);
+            $extraMetadata = [];
+            if (isset($object['owner_id']) || isset($object['owner_name'])) {
+                $extraMetadata = [
+                    'owner' => [
+                        'id' => $object['owner_id'] ?? null,
+                        'name' => $object['owner_name'] ?? null,
+                    ],
+                ];
+            }
 
             if ($this->propsIsDirectory($object)) {
-                yield new DirectoryAttributes($path, lastModified: $object['last_modified'] ?? null);
+                yield new DirectoryAttributes(
+                    $path,
+                    lastModified: $object['last_modified'] ?? null,
+                    extraMetadata: $extraMetadata
+                );
 
                 if ( ! $deep) {
                     continue;
@@ -301,6 +329,7 @@ class WebDAVAdapter implements FilesystemAdapter, PublicUrlGenerator
                     fileSize:     $object['file_size'] ?? null,
                     lastModified: $object['last_modified'] ?? null,
                     mimeType:     $object['mime_type'] ?? null,
+                    extraMetadata: $extraMetadata
                 );
             }
         }
@@ -313,6 +342,8 @@ class WebDAVAdapter implements FilesystemAdapter, PublicUrlGenerator
             '{DAV:}getcontenttype' => 'mime_type',
             'content-length' => 'file_size',
             'content-type' => 'mime_type',
+            '{http://owncloud.org/ns:}owner-id' => 'owner_id',
+            '{http://owncloud.org/ns:}owner-display-name' => 'owner_name',
         ];
 
         foreach ($mapping as $from => $to) {
